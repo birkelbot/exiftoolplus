@@ -166,6 +166,26 @@ sub PrintTagsToFile {
     # Skip directories that might match the glob.
     next unless -f $file;
 
+    # --- File Type Check --------------------------------------------
+    # Get FileType to ensure we only process supported media files.
+    my $info = $self->ImageInfo($file, 'FileType');
+    # Check for errors getting basic info.
+    eval { $self->CheckError() };
+    if ($@) {
+        carp "Skipping file '$file' due to error reading info: $@";
+        next;
+    }
+    unless ($info && exists $info->{FileType}) {
+        carp "Skipping file '$file': Could not determine FileType.";
+        next;
+    }
+    my $file_type = $info->{FileType};
+    unless (exists PHOTO_TYPES->{$file_type}
+              || exists VIDEO_TYPES->{$file_type}) {
+        next;   # Silently skip unsupported types.
+    }
+    # --- End File Type Check ----------------------------------------
+
     my $tags_ref = $self->GetTags($file, %options);
 
     # Skip if GetTags returned nothing useful or encountered an error.
