@@ -8,8 +8,22 @@ use DateTime::Format;
 use File::Basename qw(basename fileparse);  # For robust filename handling
 use File::Spec;  # For platform-independent path joining
 use Image::ExifTool;
+use Scalar::Util qw(blessed);  # To check if $datetime is a DateTime object
 
 our @ISA = qw(Image::ExifTool);
+
+# --- Constants for File Types ---
+# Based on common FileType values from ExifTool
+use constant {
+    PHOTO_TYPES => {
+        map { $_ => 1 } qw( JPEG PNG GIF TIFF HEIC CR2 NEF ARW DNG ORF
+                            PEF RW2 SRW PSD JP2 BMP WEBP AVIF RAF XMP )
+    },
+    VIDEO_TYPES => {
+        map { $_ => 1 } qw(
+            MP4 MOV AVI M2TS MTS M4V 3GP 3G2 MPG MPEG MKV WEBM FLV WMV DV MP4V )
+    },
+};
 
 # Creates a new Image::ExifToolPlus object.
 #
@@ -80,7 +94,13 @@ sub GetTags {
   }
 
   my $tags_ref = $self->ImageInfo($file);
-  $self->CheckError();
+  # CheckError after ImageInfo, as it might set Error/Warning
+  eval { $self->CheckError() };
+  if ($@) {
+    # If CheckError croaked, ImageInfo likely failed significantly
+    carp "Failed to get image info for '$file': $@";
+    return {};
+  }
 
   my %output_tags;
   foreach my $tag_key (keys %$tags_ref) {
@@ -92,7 +112,9 @@ sub GetTags {
       next if ($tag_key !~ m/date|time/i);
       # Skip specific date/time tags not related to photo/video timestamp.
       next if (
-        $tag_key =~ m/^(?:CurrentTime|ExposureTime|PosterTime|PreviewTime|ProfileDateTime|MediaTimeScale|SelectionTime|SensorReadoutTime|TimeCode|TimeScale)$/i
+           $tag_key =~ m/^(?:CurrentTime|ExposureTime|PosterTime|PreviewTime)$/i
+        || $tag_key =~ m/^(?:ProfileDateTime|MediaTimeScale|SelectionTime)$/i
+        || $tag_key =~ m/^(?:SensorReadoutTime|TimeCode|TimeScale)$/i
       );
     }
 
@@ -146,11 +168,11 @@ sub PrintTagsToFile {
 
     my $tags_ref = $self->GetTags($file, %options);
 
-    # Skip if GetTags returned nothing useful.
+    # Skip if GetTags returned nothing useful or encountered an error.
     next unless (ref $tags_ref eq 'HASH' && keys %$tags_ref);
 
     # --- Output File Handling ---------------------------------------
-    
+
     # Get filename without extension, using File::Basename for reliability.
     my ($filename, $directory, $suffix) = fileparse($file, qr/\.[^.]*/);
     my $output_basename = $filename . '_tags.txt';
@@ -173,8 +195,8 @@ sub PrintTagsToFile {
       # corrupt binary data.
       $value =~ s/\n/\n        /g if ref $value ne 'SCALAR';
 
-      # Syntax for printing to a file handle:
-      #   https://stackoverflow.com/questions/13659186/how-to-tell-perl-to-print-to-a-file-handle-instead-of-printing-the-file-handle
+      # Syntax for printing to a file handle: 
+      #   https://stackoverflow.com/q/13659186
       print $outfile "$tag_key => $value\n";
     }
 
@@ -210,7 +232,7 @@ sub _get_updated_file {
   return File::Spec->catfile($directory, $updated_basename);
 }
 
-# Sets various date/time tags for a photo file.
+# Internal helper to set various date/time tags for a photo file.
 #
 # Arguments:
 #   $file     - Path to the photo file.
@@ -220,11 +242,13 @@ sub _get_updated_file {
 #                              Otherwise, creates '_updated' copy.
 #
 # Returns:
-#   1 on success (placeholder). Consider more specific return values.
-sub SetPhotoDateTime {
+#   1 if the file was successfully written to.
+#   0 if the file was not written (no changes needed, WriteInfo returned 0).
+#   undef on error during write.
+sub _set_photo_datetime {
   my $self = shift;
   my ($file, $datetime, %options) = @_;
-  
+
   my $datetime_no_subsec =
       DateTime::Format::format_datetime($datetime, OmitSubSec => 1);
   my $datetime_no_tz =
@@ -240,26 +264,22 @@ sub SetPhotoDateTime {
   my $time_zone_str = DateTime::Format::extract_formatted_timezone($datetime);
 
   # --- Unconditional Writes -----------------------------------------
+  # These tags are key tags used by many apps. We also want to include the time
+  # zone information on all photos.
   $self->SetNewValue('EXIF:ExifIFD:CreateDate', $datetime_no_subsec_no_tz);
   $self->SetNewValue(
     'EXIF:ExifIFD:DateTimeOriginal', $datetime_no_subsec_no_tz);
   $self->SetNewValue('EXIF:ExifIFD:OffsetTimeDigitized', $time_zone_str);
   $self->SetNewValue('EXIF:ExifIFD:OffsetTimeOriginal', $time_zone_str);
 
-
   # --- Conditional Writes -------------------------------------------
+  # Use EditOnly => 1 to write only if the tag already exists.
   $self->SetNewValue(
-    'Composite:Composite:SubSecCreateDate', 
-    $datetime_incl_subsec_no_tz, EditOnly => 1
-  );
+    'Composite:SubSecCreateDate', $datetime_incl_subsec_no_tz, EditOnly => 1);
   $self->SetNewValue(
-    'Composite:Composite:SubSecDateTimeOriginal',
-    $datetime_incl_subsec, EditOnly => 1
-  );
+    'Composite:SubSecDateTimeOriginal', $datetime_incl_subsec, EditOnly => 1);
   $self->SetNewValue(
-    'Composite:Composite:SubSecModifyDate',
-    $datetime_incl_subsec, EditOnly => 1
-  );
+    'Composite:SubSecModifyDate', $datetime_incl_subsec, EditOnly => 1);
   $self->SetNewValue(
     'EXIF:ExifIFD:ModifyDate',
     $datetime_no_subsec_no_tz, EditOnly => 1
@@ -284,47 +304,61 @@ sub SetPhotoDateTime {
     'XMP:XMP-xmp:ModifyDate', $datetime_no_subsec, EditOnly => 1);
 
   # --- SubSecTime Handling --------------------------------
-  my $has_subseconds = $datetime->millisecond != 0;
   # EditOnly Logic:
-  # - If $has_subseconds is TRUE (subseconds were provided), EditOnly=FALSE(0).
+  # - If subseconds were provided, EditOnly=FALSE(0).
   #   Forces create/overwrite with the new subsecond value.
-  # - If $has_subseconds is FALSE (subseconds NOT provided), EditOnly=TRUE(1).
+  # - If subseconds were NOT provided, EditOnly=TRUE(1).
   #   Only writes (sets to '000') if the tag *already exists*.
+  my $sub_sec_edit_only = $datetime->millisecond == 0;
+  # Format subseconds as a string with 3 digits.
+  my $sub_sec_value = sprintf("%03d", $datetime->millisecond);
+
   $self->SetNewValue(
-    'EXIF:ExifIFD:SubSecTime',
-    $datetime->millisecond,
-    EditOnly => !$has_subseconds
+    'EXIF:ExifIFD:SubSecTime', $sub_sec_value, EditOnly => $sub_sec_edit_only);
+  $self->SetNewValue(
+    'EXIF:ExifIFD:SubSecTimeDigitized',
+    $sub_sec_value, EditOnly => $sub_sec_edit_only
   );
   $self->SetNewValue(
-    'EXIF:SubSecTimeDigitized',
-    $datetime->millisecond,
-    EditOnly => !$has_subseconds
-  );
-  $self->SetNewValue(
-    'EXIF:SubSecTimeOriginal',
-    $datetime->millisecond,
-    EditOnly => !$has_subseconds
+    'EXIF:ExifIFD:SubSecTimeOriginal',
+    $sub_sec_value, EditOnly => $sub_sec_edit_only
   );
   # --- End SubSecTime Handling ----------------------------
 
-  $self->CheckError();
-
-  if ($options{Overwrite}) {
-    my $result = $self->WriteInfo($file);
-    $self->CheckError();
-    $self->PrintTagsToFile(qq("$file"), DateTime => 1) if $result;
-  } else {
-    my $outfile = $self->_get_updated_file($file);
-    unlink($outfile);  # Delete pre-existing updated file, if it exists.
-    my $result = $self->WriteInfo($file, $outfile);
-    $self->CheckError();
-    $self->PrintTagsToFile(qq("$outfile"), DateTime => 1) if $result;
+  # Check for errors from SetNewValue calls before attempting write.
+  eval { $self->CheckError() };
+  if ($@) {
+      carp "Error preparing tags for photo '$file': $@";
+      return undef;  # Indicate error.
   }
 
-  return 1;
+  my $result;
+  my $outfile = $file;
+  if ($options{Overwrite}) {
+    $result = $self->WriteInfo($file);
+  } else {
+    my $outfile = $self->_get_updated_file($file);
+    # Attempt to remove existing output file, warn if it fails but continue
+    if (-e $outfile) {
+        unless (unlink($outfile)) {
+            carp "Could not delete existing output file '$outfile': $!";
+        }
+    }
+    $result = $self->WriteInfo($file, $outfile);
+  }
+
+  eval { $self->CheckError() };
+  if ($@) {
+      carp "Error writing tags to photo '$outfile': $@";
+      return undef;  # Indicate error.
+  }
+
+  # WriteInfo returns: 1 on success, 0 if no changes, undef on error.
+  # We return 1 only if the file was actually modified.
+  return (defined $result && $result == 1) ? 1 : 0;
 }
 
-# Sets various date/time tags for a video file.
+# Internal helper to set various date/time tags for a video file.
 #
 # Arguments:
 #   $file     - Path to the video file.
@@ -334,8 +368,10 @@ sub SetPhotoDateTime {
 #                              Otherwise, creates '_updated' copy.
 #
 # Returns:
-#   1 on success (placeholder). Consider more specific return values.
-sub SetVideoDateTime {
+#   1 if the file was successfully written to.
+#   0 if the file was not written (no changes needed, WriteInfo returned 0).
+#   undef on error during write.
+sub _set_video_datetime {
   my $self = shift;
   my ($file, $datetime, %options) = @_;
 
@@ -346,6 +382,8 @@ sub SetVideoDateTime {
       DateTime::Format::format_datetime($datetime, ConvertToUTC => 1);
 
   # --- Unconditional Writes -----------------------------------------
+  # These tags are key tags used by many apps. We also want to include the time
+  # zone information on all videos.
   $self->SetNewValue('QuickTime:Keys:CreationDate', $datetime_local);
   $self->SetNewValue('QuickTime:UserData:DateTimeOriginal', $datetime_local);
   $self->SetNewValue(
@@ -353,6 +391,7 @@ sub SetVideoDateTime {
   $self->SetNewValue('XMP:XMP-xmp:CreateDate', $datetime_local_no_subsec);
 
   # --- Conditional Writes -------------------------------------------
+  # Use EditOnly => 1 to write only if the tag already exists.
   $self->SetNewValue(
     'File:System:FileCreateDate', $datetime_local,
     Protected => 1, EditOnly => 1
@@ -366,35 +405,159 @@ sub SetVideoDateTime {
   $self->SetNewValue(
     'XMP:XMP-xmp:ModifyDate', $datetime_local_no_subsec, EditOnly => 1);
 
+  # --- Track DateTimes (Conditional) --------------------------------
+  # These often exist in multiple tracks. Only update if already present.
   my @track_base_tags = (
     'MediaCreateDate',
     'MediaModifyDate',
     'TrackCreateDate',
     'TrackModifyDate',
   );
-  # Loop through potential tracks 1 to 9 and set the corresponding date tags.
-  for my $track_num (1 .. 9) {
-    foreach my $base_tag (@track_base_tags) {
-      my $full_tag = "QuickTime:Track${track_num}:${base_tag}";
-      $self->SetNewValue($full_tag => $datetime_utc, EditOnly => 1);
-    }
+  foreach my $base_tag (@track_base_tags) {
+      # Let ExifTool find the tag in any track (Track1, Track2, etc.).
+      $self->SetNewValue(
+        $base_tag => $datetime_utc, EditOnly => 1, Group => 'QuickTime');
   }
 
-  $self->CheckError();
+  # Check for errors from SetNewValue calls before attempting write.
+  eval { $self->CheckError() };
+  if ($@) {
+      carp "Error preparing tags for video '$file': $@";
+      return undef;  # Indicate error.
+  }
 
+  my $result;
+  my $outfile = $file;
   if ($options{Overwrite}) {
-    my $result = $self->WriteInfo($file);
-    $self->CheckError();
-    $self->PrintTagsToFile(qq("$file"), DateTime => 1) if $result;
+    $result = $self->WriteInfo($file);
   } else {
-    my $outfile = $self->_get_updated_file($file);
-    unlink($outfile);  # Delete pre-existing updated file, if it exists.
-    my $result = $self->WriteInfo($file, $outfile);
-    $self->CheckError();
-    $self->PrintTagsToFile(qq("$outfile"), DateTime => 1) if $result;
+    $outfile = $self->_get_updated_file($file);
+     # Attempt to remove existing output file, warn if it fails but continue.
+    if (-e $outfile) {
+        unless (unlink($outfile)) {
+            carp "Could not delete existing output file '$outfile': $!";
+        }
+    }
+    $result = $self->WriteInfo($file, $outfile);
   }
 
-  return 1;
+  eval { $self->CheckError() };
+  if ($@) {
+      carp "Error writing tags to video '$outfile': $@";
+      return undef; # Indicate error
+  }
+
+  # WriteInfo returns: 1 on success, 0 if no changes, undef on error.
+  # We return 1 only if the file was actually modified.
+  return (defined $result && $result == 1) ? 1 : 0;
+}
+
+
+# Sets date/time tags for multiple photo/video files based on a glob pattern.
+# Determines file type and dispatches to appropriate internal method.
+#
+# Arguments:
+#   $fileglob - Glob pattern (e.g., "*.jpg", "/path/to/media/*.*").
+#               Remember to double quote globs with spaces.
+#   $datetime - DateTime object representing the timestamp to set.
+#   %options  - Hash of options:
+#                 Overwrite      => 1 : Modify files in place.
+#                                    Otherwise, creates '_updated' copies.
+#                 VerboseLogging => 1 : Print messages for each updated file.
+#
+# Returns:
+#   A hash reference containing counts:
+#     { photos => N, videos => N, skipped => N }
+#   Returns undef on major error (e.g., invalid DateTime object).
+sub SetDateTime {
+    my $self = shift;
+    my ($fileglob, $datetime, %options) = @_;
+
+    unless (blessed($datetime) && $datetime->isa('DateTime')) {
+        carp "Invalid DateTime object passed to SetDateTime.";
+        return undef;
+    }
+
+    my @files = glob($fileglob);
+    unless (@files) {
+        carp "No files found matching glob pattern: $fileglob";
+        return { photos => 0, videos => 0, skipped => 0 };
+    }
+
+    my %counts = ( photos => 0, videos => 0, skipped => 0 );
+
+    print "Starting DateTime update process...\n" if $options{VerboseLogging};
+
+    foreach my $file (@files) {
+        # Skip directories.
+        next unless -f $file;
+
+        # Get FileType to determine how to process.
+        # Request only FileType to minimize overhead.
+        my $info = $self->ImageInfo($file, 'FileType');
+        # Check for errors getting basic info.
+        eval { $self->CheckError() };
+        if ($@) {
+            carp "Skipping file '$file' due to error reading info: $@";
+            $counts{skipped}++;
+            next;
+        }
+        unless ($info && exists $info->{FileType}) {
+            carp "Skipping file '$file': Could not determine FileType.";
+            $counts{skipped}++;
+            next;
+        }
+
+        my $file_type = $info->{FileType};
+        my $update_status; # Will be 1 (updated), 0 (not updated), undef (error)
+
+        if (exists PHOTO_TYPES->{$file_type}) {
+            $update_status =
+                $self->_set_photo_datetime($file, $datetime, %options);
+            if (defined $update_status && $update_status == 1) {
+                $counts{photos}++;
+                print "Updated photo: $file\n" if $options{VerboseLogging};
+            } elsif (!defined $update_status) {
+                # Error occurred and was logged by _set_photo_datetime.
+                $counts{skipped}++;
+            } else {  # update_status == 0
+                # File was processed, but no tags were changed.
+                print "Skipped photo (no changes needed): $file\n"
+                    if $options{VerboseLogging};
+                $counts{skipped}++;
+            }
+        }
+        elsif (exists VIDEO_TYPES->{$file_type}) {
+            $update_status =
+                $self->_set_video_datetime($file, $datetime, %options);
+             if (defined $update_status && $update_status == 1) {
+                $counts{videos}++;
+                print "Updated video: $file\n" if $options{VerboseLogging};
+            } elsif (!defined $update_status) {
+                # Error occurred and was logged by _set_video_datetime.
+                $counts{skipped}++;
+            } else {  # update_status == 0
+                # File was processed, but no tags were changed.
+                print "Skipped video (no changes needed or error): $file\n"
+                    if $options{VerboseLogging};
+                $counts{skipped}++;
+            }
+        }
+        else {
+            carp "Skipping unsupported file type '$file_type': $file";
+            $counts{skipped}++;
+        }
+    }
+
+    # Print summary
+    print "----------------------------------------\n";
+    print "DateTime update process complete.\n";
+    print "  Photos updated: $counts{photos}\n";
+    print "  Videos updated: $counts{videos}\n";
+    print "  Files skipped:  $counts{skipped}\n";
+    print "----------------------------------------\n";
+
+    return \%counts;
 }
 
 1;
