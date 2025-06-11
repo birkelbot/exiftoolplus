@@ -295,7 +295,7 @@ sub _set_photo_datetime {
   # --- Conditional Writes -------------------------------------------
   # Use EditOnly => 1 to write only if the tag already exists.
   $self->SetNewValue(
-    'Composite:SubSecCreateDate', $datetime_incl_subsec_no_tz, EditOnly => 1);
+    'Composite:SubSecCreateDate', $datetime_incl_subsec, EditOnly => 1);
   $self->SetNewValue(
     'Composite:SubSecDateTimeOriginal', $datetime_incl_subsec, EditOnly => 1);
   $self->SetNewValue(
