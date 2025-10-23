@@ -5,69 +5,28 @@ use warnings;
 
 use DateTime::Format::Builder;
 
+use Exporter qw(import);
+our @EXPORT_OK = qw( parse_datetime );
+
 # ------------------------------------------------------------------------------
 # --- Private Subroutines
 # ------------------------------------------------------------------------------
 
-# Constructs the regular expression for the expected datetime format.
-# Format: YYYY : MM : DD HH : MM : SS[.n{1,9}] [Z|+/-HH:MM]
+# Helper subroutine to handle fractional seconds parsing and nanosecond calculation.
 #
 # Arguments:
-#   None.
+#   $parsed - Hashref of the parsed values (modified in place).
 #
 # Returns:
-#   A compiled regular expression object (qr//).
-sub _make_regex {
-    # Date part: YYYY : MM : DD
-    my $date_re = '(\d{4}) \s : \s (\d{2}) \s : \s (\d{2})';
-
-    # Time part: HH : MM : SS[.fffffffff] (fractional seconds optional)
-    my $time_re =
-      '(\d{2}) \s : \s (\d{2}) \s : \s (\d{2} (?: \. \d{1,9})?)';
-
-    # Time zone part: Z (UTC) or +/-HH:MM offset (optional)
-    my $tz_re = '(Z | [\+\-] \d{2} \s : \s \d{2})';
-
-    # Combine parts into a single regex, anchored to start/end of string.
-    # x - extended mode (ignore whitespace, allow comments)
-    # m - treat string as multiple lines
-    # s - treat string as single line ('.' matches newline)
-    return qr/^ $date_re \s $time_re (?: \s $tz_re)? $/xms;
-}
-
-# Cleans up and adjusts the data parsed by the regex.
-# This is called as a postprocess callback by DateTime::Format::Builder.
-#
-# Arguments:
-#   %args - Hash passed by DateTime::Format::Builder, containing:
-#           input  => The original input string.
-#           parsed => Hashref of the captured values from the regex.
-#                     (This hashref is modified in place).
-#
-# Returns:
-#   1 to indicate successful post-processing.
-sub _postprocess {
-    # Extract input string and parsed results hash from arguments.
-    # qw() is a Perl shortcut for creating a list of quoted words.
-    my ($input, $parsed) = @args{qw( input parsed )};
-
-    # Default to UTC if no time zone is specified or if it's 'Z'.
-    if ( !defined $parsed->{time_zone} or $parsed->{time_zone} eq 'Z' ) {
-        $parsed->{time_zone} = 'UTC';
-    }
-    else {
-        # Remove colons from HH:MM offset for DateTime::TimeZone
-        # compatibility using the transliteration operator (tr///).
-        $parsed->{time_zone} =~ tr/://d;
-    }
-
+#   None. Modifies $parsed hashref directly.
+sub _handle_fractional_seconds {
+    my ($parsed) = @_; # Pass the hashref directly
     # Handle potential fractional seconds (nanoseconds).
     # This check is necessary as fractional seconds are optional.
     if ( $parsed->{second} =~ /\./ ) {
         # Split seconds into integer and fractional parts (limit to 2 parts).
         my ( $second, $fractional_second ) =
           split( /\./, $parsed->{second}, 2 );
-
         $parsed->{second} = $second;
 
         # Pad fractional part with trailing zeros to exactly 9 digits.
@@ -78,27 +37,40 @@ sub _postprocess {
         # Ensure nanosecond field exists even if there's no fractional part.
         $parsed->{nanosecond} = 0;
     }
+}
 
+# Postprocess callback for the parser.
+# Sets the default time zone to 'UTC' and handles fractional seconds.
+sub _postprocess {
+    my ($args) = @_;
+    my ($input, $parsed) = @{$args}{qw( input parsed )};
+
+    # Always set default time zone to UTC since the regex doesn't capture one.
+    $parsed->{time_zone} = 'UTC';
+
+    _handle_fractional_seconds($parsed);
     # Return a true value to signal success to DateTime::Format::Builder.
     return 1;
 }
-
 # ------------------------------------------------------------------------------
 # Parser Setup
 # ------------------------------------------------------------------------------
+# Define two parsers: one requiring a time zone, one without.
+# This avoids potential issues with optional capture groups in DateTime::Format::Builder.
 
-# Create the parser instance using DateTime::Format::Builder.
-# This pre-compiles the parsing logic using the regex and post-processing
-# subroutine defined above for efficiency.
+# Parser 1: Expects YYYY : MM : DD HH : MM : SS[.n] TZ
+# REMOVED - Sticking to one simple parser for now.
+
+# Define a single parser for YYYY:MM:DD HH:MM:SS[.n] (no time zone)
 my $parser = DateTime::Format::Builder->parser(
-    # Map regex capture groups ($1, $2, etc.) to named parameters for DateTime.
-    params => [qw( year month day hour minute second time_zone )],
-    # The regex used to match and capture datetime components.
-    regex  => _make_regex(),
-    # The subroutine reference (\&) to call after a successful regex match
-    # for cleanup/adjustment.
-    postprocess => \&_postprocess,
+    # --- MINIMAL TEST: Parse a 2-digit number ---
+    params => [qw( number )], # Single parameter
+    # Regex matches exactly two digits
+    regex  => qr/^(\d{2})$/,
 );
+# Check parser creation
+die "Failed to create DateTime parser."
+    unless defined $parser && ref($parser) && $parser->can('parse');
 
 # ------------------------------------------------------------------------------
 # Public Subroutines
@@ -119,10 +91,12 @@ my $parser = DateTime::Format::Builder->parser(
 sub parse_datetime {
     my ($datetime_string) = @_;
 
-    # Use the pre-built parser object to parse the string.
-    # The $parser->parse method handles non-matching/invalid input
-    # by returning undef, so explicit checks here are redundant.
-    return $parser->parse($datetime_string);
+    # Add basic validation for undef or empty input string.
+    return undef unless defined $datetime_string && length $datetime_string;
+
+    # Use the single parser. It returns undef on failure.
+    my $dt = $parser->parse($datetime_string);
+    return $dt; # Return result (DateTime object or undef)
 }
 
 1;

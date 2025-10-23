@@ -25,17 +25,15 @@ our @EXPORT_OK = qw( extract_formatted_timezone format_datetime );
 sub extract_formatted_timezone {
     my ($datetime) = @_;
 
-    # Improvement: Check if the input is a valid DateTime object.
+    # Check if the input is a valid DateTime object.
     unless ( eval { $datetime->isa('DateTime') } ) {
         warn "Input is not a DateTime object" if $^W; # Warn if warnings are on
-        return; # Return undef
+        return;  # Return undef.
     }
 
     # Get the time zone offset in +HHMM/-HHMM format.
     my $time_zone_offset = $datetime->strftime("%z");
 
-    # Improvement: Use regex for safer parsing and formatting.
-    # This ensures we handle only the expected +/-HHMM format.
     if ( $time_zone_offset =~ /^([+\-])(\d{2})(\d{2})$/ ) {
         # $1 = sign, $2 = hours, $3 = minutes
         return "$1$2:$3";
@@ -44,7 +42,7 @@ sub extract_formatted_timezone {
         # Handle unexpected formats (e.g., potentially 'Z' or others,
         # though %z usually gives numeric offsets).
         warn "Unexpected time zone offset format: $time_zone_offset" if $^W;
-        return; # Return undef
+        return;  # Return undef.
     }
 }
 
@@ -69,7 +67,7 @@ sub format_datetime {
     # Check if the input is a valid DateTime object.
     unless ( eval { $datetime_orig->isa('DateTime') } ) {
         warn "Input is not a DateTime object" if $^W;
-        return;  # Return undef
+        return;  # Return undef.
     }
 
     # Clone the input datetime object so modifications don't affect the caller.
