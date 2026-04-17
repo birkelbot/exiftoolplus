@@ -289,6 +289,8 @@ sub _set_photo_datetime {
   $self->SetNewValue('EXIF:ExifIFD:CreateDate', $datetime_no_subsec_no_tz);
   $self->SetNewValue(
     'EXIF:ExifIFD:DateTimeOriginal', $datetime_no_subsec_no_tz);
+  $self->SetNewValue('EXIF:IFD0:ModifyDate', $datetime_no_tz);
+  $self->SetNewValue('EXIF:ExifIFD:OffsetTime', $time_zone_str);
   $self->SetNewValue('EXIF:ExifIFD:OffsetTimeDigitized', $time_zone_str);
   $self->SetNewValue('EXIF:ExifIFD:OffsetTimeOriginal', $time_zone_str);
 
@@ -304,8 +306,6 @@ sub _set_photo_datetime {
     'EXIF:ExifIFD:ModifyDate',
     $datetime_no_subsec_no_tz, EditOnly => 1
   );
-  $self->SetNewValue('EXIF:ExifIFD:OffsetTime', $time_zone_str, EditOnly => 1);
-  $self->SetNewValue('EXIF:IFD0:ModifyDate', $datetime_no_tz, EditOnly => 1);
   $self->SetNewValue(
     'File:System:FileCreateDate', $datetime_no_subsec,
     Protected => 1, EditOnly => 1);
@@ -404,6 +404,8 @@ sub _set_video_datetime {
   # --- Unconditional Writes -----------------------------------------
   # These tags are key tags used by many apps. We also want to include the time
   # zone information on all videos.
+  $self->SetNewValue('QuickTime:CreateDate', $datetime_utc);
+  $self->SetNewValue('QuickTime:ModifyDate', $datetime_utc);
   $self->SetNewValue('QuickTime:Keys:CreationDate', $datetime_local);
   $self->SetNewValue('QuickTime:UserData:DateTimeOriginal', $datetime_local);
   $self->SetNewValue(
@@ -420,8 +422,6 @@ sub _set_video_datetime {
     'File:System:FileModifyDate', $datetime_local,
     Protected => 1, EditOnly => 1
   );
-  $self->SetNewValue('QuickTime:CreateDate', $datetime_utc, EditOnly => 1);
-  $self->SetNewValue('QuickTime:ModifyDate', $datetime_utc, EditOnly => 1);
   $self->SetNewValue(
     'XMP:XMP-xmp:ModifyDate', $datetime_local_no_subsec, EditOnly => 1);
 
