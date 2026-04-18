@@ -139,6 +139,42 @@ sub GetTags {
   return \%output_tags;
 }
 
+# Internal helper to safely get a list of files from a glob pattern or literal
+# path.
+#
+# This function first checks if the exact file path provided exists. This is
+# crucial because literal filenames might contain characters like square
+# brackets (e.g., "[1].jpg") which are normally interpreted as character
+# classes in glob patterns.
+#
+# If it's a pattern instead of an exact file, it falls back to using
+# File::Glob::bsd_glob. bsd_glob is used because it reliably handles paths with
+# spaces in them, unlike the older built-in glob which notoriously treats spaces
+# as separators.
+#
+# Arguments:
+#   $fileglob - Glob pattern or file path.
+#
+# Returns:
+#   An array of file paths.
+sub _get_files_from_glob {
+  my $self = shift;
+  my ($fileglob) = @_;
+
+  my @files;
+  my $clean_pattern = $fileglob;
+  $clean_pattern =~ s/^'([^']*)'$/$1/;
+
+  if (-e $clean_pattern) {
+    @files = ($clean_pattern);
+  } else {
+    require File::Glob;
+    @files = File::Glob::bsd_glob($clean_pattern);
+  }
+
+  return @files;
+}
+
 # For each file in a fileglob, gets the metadata tags and prints them to a text
 # file named "<original_filename>_tags.txt" in the same directory.
 #
@@ -155,18 +191,7 @@ sub PrintTagsToFile {
   my $self = shift;
   my ($fileglob, %options) = @_;
 
-  # If the exact path exists, use it literally to avoid globbing issues
-  # with characters like '[' and ']'. Otherwise, safely glob using bsd_glob.
-  my @files;
-  my $clean_pattern = $fileglob;
-  $clean_pattern =~ s/^'([^']*)'$/$1/;
-
-  if (-e $clean_pattern) {
-    @files = ($clean_pattern);
-  } else {
-    require File::Glob;
-    @files = File::Glob::bsd_glob($clean_pattern);
-  }
+  my @files = $self->_get_files_from_glob($fileglob);
 
   unless (@files) {
     carp "No files found matching glob pattern: $fileglob";
@@ -510,18 +535,7 @@ sub SetDateTime {
         return undef;
     }
 
-    # If the exact path exists, use it literally to avoid globbing issues
-    # with characters like '[' and ']'. Otherwise, safely glob using bsd_glob.
-    my @files;
-    my $clean_pattern = $fileglob;
-    $clean_pattern =~ s/^'([^']*)'$/$1/;
-
-    if (-e $clean_pattern) {
-        @files = ($clean_pattern);
-    } else {
-        require File::Glob;
-        @files = File::Glob::bsd_glob($clean_pattern);
-    }
+    my @files = $self->_get_files_from_glob($fileglob);
 
     unless (@files) {
         carp "No files found matching glob pattern: $fileglob";
