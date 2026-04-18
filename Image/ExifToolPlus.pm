@@ -144,8 +144,8 @@ sub GetTags {
 #
 # Arguments:
 #   $fileglob - Glob pattern (e.g., "*.jpg", "/path/to/images/*.*").
-#               Remember to double quote globs with spaces:
-#               https://stackoverflow.com/questions/32260485.
+#               No need to double quote globs with spaces; this wrapper
+#               handles space-containing paths or patterns dynamically.
 #   %options  - Hash of options (passed directly to GetTags():
 #                 DateTime => 1 to only get the DateTime-related tags.
 #
@@ -155,7 +155,19 @@ sub PrintTagsToFile {
   my $self = shift;
   my ($fileglob, %options) = @_;
 
-  my @files = glob($fileglob);
+  # If the exact path exists, use it literally to avoid globbing issues
+  # with characters like '[' and ']'. Otherwise, safely glob using bsd_glob.
+  my @files;
+  my $clean_pattern = $fileglob;
+  $clean_pattern =~ s/^'([^']*)'$/$1/;
+
+  if (-e $clean_pattern) {
+    @files = ($clean_pattern);
+  } else {
+    require File::Glob;
+    @files = File::Glob::bsd_glob($clean_pattern);
+  }
+
   unless (@files) {
     carp "No files found matching glob pattern: $fileglob";
     return 0;
@@ -478,7 +490,7 @@ sub _set_video_datetime {
 #
 # Arguments:
 #   $fileglob - Glob pattern (e.g., "*.jpg", "/path/to/media/*.*").
-#               Remember to double quote globs with spaces.
+#               Path spaces and bracket characters are handled properly.
 #   $datetime - DateTime object representing the timestamp to set.
 #   %options  - Hash of options:
 #                 Overwrite      => 1 : Modify files in place.
@@ -498,7 +510,19 @@ sub SetDateTime {
         return undef;
     }
 
-    my @files = glob($fileglob);
+    # If the exact path exists, use it literally to avoid globbing issues
+    # with characters like '[' and ']'. Otherwise, safely glob using bsd_glob.
+    my @files;
+    my $clean_pattern = $fileglob;
+    $clean_pattern =~ s/^'([^']*)'$/$1/;
+
+    if (-e $clean_pattern) {
+        @files = ($clean_pattern);
+    } else {
+        require File::Glob;
+        @files = File::Glob::bsd_glob($clean_pattern);
+    }
+
     unless (@files) {
         carp "No files found matching glob pattern: $fileglob";
         return { photos => 0, videos => 0, skipped => 0 };
