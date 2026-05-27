@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use Carp;
 
+use DateTime;
 use DateTime::Format;
 use File::Basename qw(basename fileparse);  # For robust filename handling
 use File::Spec;  # For platform-independent path joining
@@ -614,6 +615,305 @@ sub SetDateTime {
     print "  Videos updated: $counts{videos}\n";
     print "  Files skipped:  $counts{skipped}\n";
     print "----------------------------------------\n";
+
+    return \%counts;
+}
+
+# Sets date/time tags for multiple photo/video files based on a glob pattern,
+# parsing the timestamp from each file's name.
+#
+# Supported filename patterns:
+#   - PXL_YYYYMMDD_HHMMSSmmm... -> strictly UTC
+#   - Flexible interchangeable-separator formats for non-Pixel files
+#     (using spaces, hyphens, underscores, or periods as interchangeable
+#     separators) -> LOCAL or custom timezone
+#
+# Arguments:
+#   $fileglob - Glob pattern (e.g., "*.jpg", "test_to_pull_etc/*").
+#   %options  - Hash of options:
+#                 Overwrite      => 1 : Modify files in place.
+#                                    Otherwise, creates '_updated' copies.
+#                 VerboseLogging => 1 : Print messages for each updated file.
+#                 TimeZone       => $tz : Custom TimeZone override for
+#                                         non-Pixel files (defaults to 'local').
+#
+# Returns:
+#   A hash reference containing counts:
+#     { photos => N, videos => N, skipped => N }
+sub SetDateTimeFromFileName {
+    my $self = shift;
+    my ($fileglob, %options) = @_;
+
+    my @files = $self->_get_files_from_glob($fileglob);
+
+    unless (@files) {
+        carp "No files found matching glob pattern: $fileglob";
+        return { photos => 0, videos => 0, skipped => 0 };
+    }
+
+    my %counts = ( photos => 0, videos => 0, skipped => 0 );
+
+    if ($options{VerboseLogging}) {
+        print "Starting DateTime from filename process...\n";
+    }
+
+    # Set default time zone to 'local' for non-Pixel files if not provided.
+    my $default_tz = $options{TimeZone} // 'local';
+
+    foreach my $file (@files) {
+        # Skip directories.
+        next unless -f $file;
+
+        # Resolve FileType to ensure we only process JPEG and MP4 files.
+        my $info = $self->ImageInfo($file, 'FileType');
+        eval { $self->CheckError() };
+        if ($@) {
+            carp "Skipping file '$file' due to error reading info: $@";
+            $counts{skipped}++;
+            next;
+        }
+        unless ($info && exists $info->{FileType}) {
+            carp "Skipping file '$file': Could not determine FileType.";
+            $counts{skipped}++;
+            next;
+        }
+
+        my $file_type = $info->{FileType};
+        unless ($file_type eq 'JPEG' || $file_type eq 'MP4') {
+            carp "Skipping unsupported file type '$file_type' for file "
+               . "'$file' (only JPEG and MP4 are supported).";
+            $counts{skipped}++;
+            next;
+        }
+
+        # Extract base filename without directory or extension.
+        my ($filename, $directory, $suffix) = fileparse($file, qr/\.[^.]*/);
+
+        # Check for standalone PXL prefix (case-insensitive).
+        my $has_pxl_token =
+            ($filename =~ /(?:^|[^a-zA-Z])PXL(?:_|$)/i) ? 1 : 0;
+
+        my ($year, $month, $day, $hour, $minute, $second, $millisecond);
+        my $tz = $default_tz;
+
+        if ($has_pxl_token) {
+            # Google Pixel strict compact format: YYYYMMDD_HHMMSS[mmm]
+            my $pxl_re = qr/(?:^|[^0-9])(\d{4})(\d{2})(\d{2})_/
+                       . qr/(\d{2})(\d{2})(\d{2})(\d{3})?/
+                       . qr/(?!\.\d)(?!-\d)(?!_\d)(?:[^0-9]|$)/;
+            if ($filename =~ /$pxl_re/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $tz = 'UTC'; # Strictly UTC for Pixel files.
+                }
+            }
+            unless (defined $year) {
+                carp "Skipping file '$file': Standalone PXL token detected, "
+                   . "but filename does not strictly match the expected "
+                   . "Google Pixel compact format (YYYYMMDD_HHMMSS[mmm]).";
+                $counts{skipped}++;
+                next;
+            }
+        }
+        else {
+            # Try non-Pixel interchangeable separator formats.
+            my $parsed = 0;
+
+            # 1. Fully separated: YYYY-MM-DD HH-MM-SS
+            my $sep_re1 = qr/(?:^|[^0-9])(\d{4})[-_\. ](\d{2})[-_\. ](\d{2})/
+                        . qr/[-_\. ]+(\d{2})[-_\. :]+(\d{2})[-_\. :]+(\d{2})/
+                        . qr/(?:[-_\.\:](\d{1,9}))?(?:[^0-9]|$)/;
+            if ($filename =~ /$sep_re1/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $parsed = 1;
+                }
+            }
+
+            # 2. Compact date with separated time: YYYYMMDD_HH-MM-SS
+            my $sep_re2 = qr/(?:^|[^0-9])(\d{4})(\d{2})(\d{2})[-_\. ]+/
+                        . qr/(\d{2})[-_\. :]+(\d{2})[-_\. :]+(\d{2})/
+                        . qr/(?:[-_\.\:](\d{1,9}))?(?:[^0-9]|$)/;
+            if (!$parsed && $filename =~ /$sep_re2/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $parsed = 1;
+                }
+            }
+
+            # 3. Compact date and compact time with optional subseconds:
+            #    YYYYMMDD_HHMMSS.mmm
+            my $sep_re3 = qr/(?:^|[^0-9])(\d{4})(\d{2})(\d{2})[-_\. ]+/
+                        . qr/(\d{2})(\d{2})(\d{2})/
+                        . qr/(?:[-_\.\:](\d{1,9}))?(?:[^0-9]|$)/;
+            if (!$parsed && $filename =~ /$sep_re3/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $parsed = 1;
+                }
+            }
+
+            # 4. Compact format: YYYYMMDD [sep] HHMMSS[mmm]
+            my $sep_re4 = qr/(?:^|[^0-9])(\d{4})(\d{2})(\d{2})[-_\. ]+/
+                        . qr/(\d{2})(\d{2})(\d{2})(\d{3})?/
+                        . qr/(?!\.\d)(?!-\d)(?!_\d)(?:[^0-9]|$)/;
+            if (!$parsed && $filename =~ /$sep_re4/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $parsed = 1;
+                }
+            }
+
+            # 5. Completely solid format: YYYYMMDDHHMMSS or YYYYMMDDHHMMSSmmm
+            my $sep_re5 = qr/(?:^|[^0-9])(\d{4})(\d{2})(\d{2})/
+                        . qr/(\d{2})(\d{2})(\d{2})(\d{3})?/
+                        . qr/(?:[^0-9]|$)/;
+            if (!$parsed && $filename =~ /$sep_re5/) {
+                my ($y, $m, $d, $h, $min, $s, $ms) =
+                    ($1, $2, $3, $4, $5, $6, $7 // 0);
+                if ($y >= 1990 && $y <= 2050
+                    && $m >= 1 && $m <= 12
+                    && $d >= 1 && $d <= 31
+                    && $h >= 0 && $h <= 23
+                    && $min >= 0 && $min <= 59
+                    && $s >= 0 && $s <= 59)
+                {
+                    ($year, $month, $day, $hour, $minute, $second,
+                     $millisecond) = ($y, $m, $d, $h, $min, $s, $ms);
+                    $parsed = 1;
+                }
+            }
+
+            unless ($parsed) {
+                carp "Skipping file '$file': Filename does not contain "
+                   . "a recognizable, valid timestamp within bounds "
+                   . "(1990-2050).";
+                $counts{skipped}++;
+                next;
+            }
+        }
+
+        # Construct standard 3-digit millisecond value.
+        # Pad or truncate to exactly 3 digits.
+        my $msec_val = $millisecond;
+        if (length($msec_val) > 3) {
+            $msec_val = substr($msec_val, 0, 3);
+        }
+
+        # Construct a DateTime object.
+        my $datetime;
+        eval {
+            $datetime = DateTime->new(
+                year       => $year,
+                month      => $month,
+                day        => $day,
+                hour       => $hour,
+                minute     => $minute,
+                second     => $second,
+                nanosecond => $msec_val * 1_000_000,
+                time_zone  => $tz,
+            );
+        };
+        if ($@) {
+            carp "Skipping file '$file': Failed to construct DateTime "
+               . "from parsed values ($year-$month-$day "
+               . "$hour:$minute:$second.$msec_val): $@";
+            $counts{skipped}++;
+            next;
+        }
+
+        my $update_status;
+        if ($file_type eq 'JPEG') {
+            $update_status =
+                $self->_set_photo_datetime($file, $datetime, %options);
+            if (defined $update_status && $update_status == 1) {
+                $counts{photos}++;
+                if ($options{VerboseLogging}) {
+                    print "Updated JPEG: $file (parsed datetime: "
+                        . DateTime::Format::format_datetime($datetime) . ")\n";
+                }
+            } elsif (!defined $update_status) {
+                $counts{skipped}++;
+            } else {
+                if ($options{VerboseLogging}) {
+                    print "Skipped JPEG (no changes needed): $file\n";
+                }
+                $counts{skipped}++;
+            }
+        }
+        elsif ($file_type eq 'MP4') {
+            $update_status =
+                $self->_set_video_datetime($file, $datetime, %options);
+            if (defined $update_status && $update_status == 1) {
+                $counts{videos}++;
+                if ($options{VerboseLogging}) {
+                    print "Updated MP4: $file (parsed datetime: "
+                        . DateTime::Format::format_datetime($datetime) . ")\n";
+                }
+            } elsif (!defined $update_status) {
+                $counts{skipped}++;
+            } else {
+                if ($options{VerboseLogging}) {
+                    print "Skipped MP4 (no changes needed or error): $file\n";
+                }
+                $counts{skipped}++;
+            }
+        }
+    }
+
+    if ($options{VerboseLogging}) {
+        print "----------------------------------------\n";
+        print "DateTime from filename process complete.\n";
+        print "  Photos updated: $counts{photos}\n";
+        print "  Videos updated: $counts{videos}\n";
+        print "  Files skipped:  $counts{skipped}\n";
+        print "----------------------------------------\n";
+    }
 
     return \%counts;
 }
